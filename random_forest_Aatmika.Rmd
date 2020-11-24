@@ -1,0 +1,674 @@
+---
+title: "Random Forest Lab"
+author: "Aatmika Deshpande"
+date: "11/23/2020"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(DT)
+library(randomForest)
+library(rio)
+library(plotly)
+library(caret)
+library(ROCR)
+```
+
+## Background
+
+After working in cancer research, sports recruiting, advertising, and environmental research, my task now is to work alongside the government to better understand the US populous. **My goal is to build a classifier that can predict income levels in order to create more effective policymaking**. 
+
+The dataset being used has Census data on over 32,000 individuals in the US, with a variety of variables included along with the target variable, which is an indication of whether the individual's salary is above or below 50k. I will be attempting to create a classifier that will help to predict which binary category an individual would fall in, based on other variables from the dataset. 
+
+Variables in the dataset include age, education, marital status, occupation, race, sex, and more.
+
+A random forest machine learning algorithm will be used in order to create this classifier.
+
+
+## Modeling Approach
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.data"
+
+labels <- c("age","workclass","fnlwgt","education","education_num","marital_status","occupation","relationship","race","sex","capital_gain","capital_loss","hours_per_week","native_country","income")
+
+census <- read_csv(url, col_names = labels, col_types = cols(
+  age = col_double(),
+  workclass = col_factor(),
+  fnlwgt = col_double(),
+  education = col_factor(),
+  education_num = col_double(),
+  marital_status = col_factor(),
+  occupation = col_factor(),
+  relationship = col_factor(),
+  race = col_factor(),
+  sex = col_factor(),
+  capital_gain = col_double(),
+  capital_loss = col_double(),
+  hours_per_week = col_double(),
+  native_country = col_factor(),
+  income = col_factor()
+))
+
+
+census <- as_tibble(census)
+
+datatable(head(census, 50))
+```
+
+### Data Cleaning
+
+Currently, the dataset has the target variable in notation of <=50k or >50k. In order to conduct our machine learning process, this variable needs to be converted to be binary. Specifically, 1 will indicate salary above 50k, and 0 will indicate salary equal to or below 50k.
+
+```{r, echo=FALSE}
+table(census$income)
+
+census = census %>% mutate(income = case_when(
+                                    income == ">50K" ~ 1,
+                                    income == "<=50K" ~ 0),
+                           income = as.factor(income))
+
+table(census$income)
+```
+
+Two tables of counts were generated with the original classification labels and the new labels to ensure that the entries were properly classified. 24,720 individuals in the dataset have salaries of less than or equal to 50k, and 7,841 have salaries of above 50k.
+
+### Base Rate
+
+```{r, echo=FALSE}
+base.rate = table(census$income)[2]/sum(table(census$income))
+paste0("Base Rate: ", round(base.rate,4) * 100, "%")
+```
+
+The base rate, meaning the probability of correctly classifying someone by their income level at random, with no prior knowledge, is 24.08%.
+
+### Testing and Training Data
+
+The dataset will be split 90/10 training and testing. This means we will ahve 3,256 entries in our testing dataset, and 29,305 entries in our training dataset. 
+
+```{r, echo=FALSE}
+sample_rows = 1:nrow(census)
+
+set.seed(1027) #sample(x, size, replace = FALSE, prob = NULL)
+test_rows = sample(sample_rows,
+                   dim(census)[1]*.10, #start with 10% of our dataset, could do 20%
+                   # but random forest does require more training data because of the 
+                   # sampling so 90% might be a better approach with this small of a dataset
+                   replace = FALSE)# We don't want duplicate samples
+
+census_train = census[-test_rows,]
+census_test = census[test_rows,]
+```
+
+### Mtry level
+
+The Mtry level is the number of variables randomly sampled as candidates at each split. The default number for classification is sqrt(# of variables).
+This dataset contains 15 variables, 14 if we subtract out the target variable. taking the square root of 14 gives us an mtry level of 3.74, which we will round up to 4 variables. 
+
+```{r, echo=FALSE}
+#general rule to start with the mytry value is square root of the predictors
+mytry_tune <- function(x){
+  xx <- dim(x)[2]-1
+  sqrt(xx)
+}
+       
+mytry_tune(census)
+```
+
+### Random Forest - 500 Trees
+
+Initially, we will be generating a random forest made up of 500 trees, and an mtry of 4. In order to ensure that these trees are not all identical and have the opporunity to specialize in different subsets of the data, we will set the argument of replace to TRUE.
+
+```{r, echo=FALSE}
+set.seed(1027)	
+census_RF_500 = randomForest(income~.,          
+                            census_train,     
+                            ntree = 500,        #<- Number of trees to grow. This should not be set to too small a number, to ensure that every input row gets classified at least a few times.
+                            mtry = 4,            #<- Number of variables randomly sampled as candidates at each split. 
+                            replace = TRUE,      #<- Should sampled data points be replaced.
+                            sampsize = 100,      #<- Size of sample to draw each time.
+                            nodesize = 5,        #<- Minimum numbers of data points in terminal nodes.
+                            importance = TRUE,   #<- Should importance of predictors be assessed?
+                            proximity = FALSE,    #<- Should a proximity measure between rows be calculated?
+                            norm.votes = TRUE,   #<- If TRUE (default), the final result of votes are expressed as fractions. If FALSE, raw vote counts are returned (useful for combining results from different runs).
+                            do.trace = FALSE,     #<- If set to TRUE, give a more verbose output as randomForest is run.
+                            keep.forest = TRUE,  #<- If set to FALSE, the forest will not be retained in the output object. If xtest is given, defaults to FALSE.
+                            keep.inbag = TRUE)   #<- Should an n by ntree matrix be returned that keeps track of which samples are in-bag in which trees? 
+
+
+census_RF_500
+```
+After running our initial model, we see that we have an OOB estimate of error rate as 15.85%, which is not too bad at all.
+
+```{r, echo=FALSE}
+census_RF_500_acc = sum(census_RF_500$confusion[row(census_RF_500$confusion) == 
+                                                col(census_RF_500$confusion)]) / 
+  sum(census_RF_500$confusion)
+
+paste0("Random Forest with 500 Trees Accuracy: ", round(census_RF_500_acc,4) * 100, "%")
+```
+
+This model we generated produced an accuracy level of 84.15%. 
+
+We will now review the percentage of trees that voted for each data point to be in each class. This information is displayed for the first 500 data points.
+
+```{r, echo=FALSE}
+datatable(head(as.data.frame(census_RF_500$votes), 500))
+```
+
+This first table is one of the true distribution of classification labels from the data set. The second is a table of the distribution of classification labels as predicted by our random forest model.
+
+```{r, echo=FALSE}
+table(census_train$income)
+table(census_RF_500$predicted)
+```
+
+Below is a table that allows us to determine the importance of each variable to the accuracy of the classification. The first 2 columns represent the accuracy decrease for each variable by class, while the 3rd column shows by what percentage the classification accuracy would decrease if the variable is not used. The last column shows the mean decrease in the Gini coefficient for each variable.
+
+```{r, echo=FALSE}
+datatable(as.data.frame(census_RF_500$importance))
+
+varImpPlot(census_RF_500,     #<- the randomForest model to use
+           sort = TRUE,        #<- whether to sort variables by decreasing order of importance
+           n.var = 10,        #<- number of variables to display
+           main = "Important Factors for Identifying Income Level, 500 Trees",
+           #cex = 2,           #<- size of characters or symbols
+           bg = "white",       #<- background color for the plot
+           color = "blue",     #<- color to use for the points and labels
+           lcolor = "orange")  #<- color to use for the horizontal lines
+```
+
+Based off of the table that was generated, occupation was clearly the most important variable, with a mean decrease in Gini coefficient by close to 5. Education and relationship follow close behind. Based on mean decrease in accuracy, relationship and occupation are still among the top, now followed by capital gain and marital status.
+
+#### Visualizations
+
+First, a datatable is generated to show how the error rate changes as the number of trees increases. We also added another variable that measures the difference between the error rates. We would want to minimize this but with caution, as it could be the case that the difference in these errors is quite small, but both of them together are very high. It was added on to the table just as another point to track and consider when analyzing the tree's performance.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+census_RF_500_error = data.frame(1:nrow(census_RF_500$err.rate),
+                                census_RF_500$err.rate)
+
+
+
+colnames(census_RF_500_error) = c("Number of Trees", "Out of the Box",
+                                 "<=50k", ">50k")
+
+
+census_RF_500_error$Diff <- census_RF_500_error$`>50k`-census_RF_500_error$`<=50k`
+
+datatable(census_RF_500_error)
+```
+
+Below is a visualization with the x-axis showing the number of trees and y-axis showing error. There are 4 different lines plotted on this graph: the difference in error rates, the Out-of-Bag error, and the error for each of our classes, <=50k and >50k. From initial glance one can see that the error rates flatten out to a constant value between around 100 and 300 trees, which may hint at the fact that we have too many trees in this random forest and could decrease the number. 
+
+Additionally, our error rate for predicting the class when an individual has a salary of less than or equal to 50k is much lower than the opposing class, a difference of around .4. This means we are much better at predicting the class of <=50k than >50k.
+
+Other patterns show a lot of initial fluctuation between the error rates of the class of individuals with salaries >50k and the difference in error rates, as well as the fact that these lines mimic each other quite closely. The OOB error and class of <=50k have decreasing error rates and flatten out quite early.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+#diff measure is diff between pregnant and non pregnant 
+#x is number of trees
+#y is oob error
+#much better at predicting at negative class
+#we have way too many trees 
+
+fig <- plot_ly(x=census_RF_500_error$`Number of Trees`, y=census_RF_500_error$Diff,name="Diff", type = 'scatter', mode = 'lines')
+fig <- fig %>% add_trace(y=census_RF_500_error$`Out of the Box`, name="OOB_Er")
+fig <- fig %>% add_trace(y=census_RF_500_error$`<=50k`, name="<=50k")
+fig <- fig %>% add_trace(y=census_RF_500_error$`>50k`, name=">50k")
+
+fig
+```
+
+#### Confusion Matrix
+
+```{r, echo=FALSE}
+census_RF_500$confusion
+```
+
+Looking at the results of the confusion matrix, we are correctly classifying 20,719 individuals as being in the <=50k salary bracket, and 3,942 individuals as being the >50k bracket. As mentioned earlier, our accuracy percentage was 84.15%.
+
+That being said, we are incorrectly classifying 3,150 individuals as being in a higher salary bracket when they are actually in the lower, and 1,494 individuals as in the lower bracket when they are in the upper. 
+
+The model has a **true positive rate of 3942/(1494+3942), or 72.52%**. It has a **true negative rate of 20719/(20719+3150), or 86.8%**. We are extremely good at classifying those in the lower salary class, and fairly good at the upper salary class as well. We have a **false positive rate of 13.2%**, which is not too high at all. The **false negative rate is 27.48%, which is a bit high**. This means we often times classify an individual as possessing a salary of <=50k, when they truly have a salary of higher. 
+
+This could be an issue for the government, especially with policy making, as the higher salary class could be placed at a disproportionate advantage if people were falsely classified in the lower bracket, especially if they were to benefit from policies that were intended for those with lower incomes. Conversely, at a rate of 13% we are classifying lower income individuals as being higher income, and this could also backfire if policy were to be made that targeted the upper salary levels. Lower income individuals could take a serious hit. 
+
+For this context, I believe it is more important to reduce the error with the 'positive class', which in this case is the salary above 50k. Misclassifying someone in this class could cause large financial reprocussions. 
+
+```{r, echo=FALSE}
+datatable(census_RF_500_error)
+
+err.rate <- as.data.frame(census_RF_500$err.rate)
+
+datatable(err.rate)
+```
+
+The random forest with 426 trees has the lowest Out-of-Bag error, at 0.15799. 
+
+After once again looking at the error rates from different numbers of trees and ordering the error of the positive class from min to max, we have selected 60 trees as our optimal number of trees. While it is not correlated with the most minimal error of the positive class, it's error is 3rd lowest at 0.436, and an OOB error of 0.167. It is also in the top 10 for min differences between class errors.
+
+### Random Forest - 60 Trees
+
+```{r, echo=FALSE}
+set.seed(1027)	
+census_RF_60 = randomForest(income~.,          
+                            census_train,     
+                            ntree = 60,        #<- Number of trees to grow. This should not be set to too small a number, to ensure that every input row gets classified at least a few times.
+                            mtry = 4,            #<- Number of variables randomly sampled as candidates at each split. 
+                            replace = TRUE,      #<- Should sampled data points be replaced.
+                            sampsize = 100,      #<- Size of sample to draw each time.
+                            nodesize = 5,        #<- Minimum numbers of data points in terminal nodes.
+                            importance = TRUE,   #<- Should importance of predictors be assessed?
+                            proximity = FALSE,    #<- Should a proximity measure between rows be calculated?
+                            norm.votes = TRUE,   #<- If TRUE (default), the final result of votes are expressed as fractions. If FALSE, raw vote counts are returned (useful for combining results from different runs).
+                            do.trace = FALSE,     #<- If set to TRUE, give a more verbose output as randomForest is run.
+                            keep.forest = TRUE,  #<- If set to FALSE, the forest will not be retained in the output object. If xtest is given, defaults to FALSE.
+                            keep.inbag = TRUE)   #<- Should an n by ntree matrix be returned that keeps track of which samples are in-bag in which trees? 
+
+
+census_RF_60
+```
+
+After running our initial model, we see that we have an OOB estimate of error rate as 16.73%, which compared to the first model's 15.85%, is not too bad at all.
+
+```{r, echo=FALSE}
+census_RF_60_acc = sum(census_RF_60$confusion[row(census_RF_60$confusion) == 
+                                                col(census_RF_60$confusion)]) / 
+  sum(census_RF_60$confusion)
+
+paste0("Random Forest with 60 Trees Accuracy: ", round(census_RF_60_acc,4) * 100, "%")
+```
+
+This model we generated produced an accuracy level of 83.26%, which is less than 1% less than the previous 500 tree model, with an accuracy of 84.15%.
+
+### Comparing Random Forests
+
+Our two models that we are comparing is one with 500 trees, and one with 60 trees. In terms of OOB error and accuracy, they are almost identical, as aforementioned. 
+
+This first table is one of the true distribution of classification labels from the data set. The second is a table of the distribution of classification labels as predicted by our 500 tree model. The third is a table of predictions by our 60 tree model.
+
+```{r, echo=FALSE}
+table(census_train$income)
+table(census_RF_500$predicted)
+table(census_RF_60$predicted)
+```
+
+Both variable importance plots are displayed, the first for the 500 tree model, the second for the 60 tree model. 
+
+```{r, echo=FALSE}
+varImpPlot(census_RF_500,     #<- the randomForest model to use
+           sort = TRUE,        #<- whether to sort variables by decreasing order of importance
+           n.var = 10,        #<- number of variables to display
+           main = "Important Factors for Identifying Income Level, 500 Trees",
+           #cex = 2,           #<- size of characters or symbols
+           bg = "white",       #<- background color for the plot
+           color = "blue",     #<- color to use for the points and labels
+           lcolor = "orange")  #<- color to use for the horizontal lines
+
+varImpPlot(census_RF_60,     #<- the randomForest model to use
+           sort = TRUE,        #<- whether to sort variables by decreasing order of importance
+           n.var = 10,        #<- number of variables to display
+           main = "Important Factors for Identifying Income Level, 60 Trees",
+           #cex = 2,           #<- size of characters or symbols
+           bg = "white",       #<- background color for the plot
+           color = "blue",     #<- color to use for the points and labels
+           lcolor = "orange")  #<- color to use for the horizontal lines
+```
+
+This again shows that based on mean decrease in gini coefficient that occupation is the variable of most importance, for both models. Both are then followed by relationship and education. Relationship, occupation, and marital status are consistent for the top most important variables as determined by mean decrease in accuracy as well. 
+
+#### Visualizations
+
+A plot displaying error for the 60 tree model is shown below, after a table of these same errors. 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+census_RF_60_error = data.frame(1:nrow(census_RF_60$err.rate),
+                                census_RF_60$err.rate)
+
+
+
+colnames(census_RF_60_error) = c("Number of Trees", "Out of the Box",
+                                 "<=50k", ">50k")
+
+
+census_RF_60_error$Diff <- census_RF_60_error$`>50k`-census_RF_60_error$`<=50k`
+
+datatable(census_RF_60_error)
+```
+
+Similar to before, our error rate for predicting the class when an individual has a salary of less than or equal to 50k is much lower than the opposing class. This means we are much better at predicting the class of <=50k than >50k.
+
+Other patterns show large fluctuation in the error rates of the class of individuals with salaries >50k and the difference in error rates, as well as the fact that these lines mimic each other quite closely. The OOB error and class of <=50k error rates settle at close to only 20 trees.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+#diff measure is diff between pregnant and non pregnant 
+#x is number of trees
+#y is oob error
+#much better at predicting at negative class
+#we have way too many trees 
+
+fig2 <- plot_ly(x=census_RF_60_error$`Number of Trees`, y=census_RF_60_error$Diff,name="Diff", type = 'scatter', mode = 'lines')
+fig2 <- fig2 %>% add_trace(y=census_RF_60_error$`Out of the Box`, name="OOB_Er")
+fig2 <- fig2 %>% add_trace(y=census_RF_60_error$`<=50k`, name="<=50k")
+fig2 <- fig2 %>% add_trace(y=census_RF_60_error$`>50k`, name=">50k")
+
+fig2
+```
+
+#### Confusion Matrices
+
+A confusion matrix for the 500 trees is displayed first, then one for 60 trees.
+
+```{r, echo=FALSE}
+census_RF_500$confusion
+census_RF_60$confusion
+```
+
+**Correct classifications in the <=50k salary bracket:** 
+  - 20,719 with 500 trees
+  - 20,401 with 60 trees
+  
+**Correct classifications in the >50k salary bracket:** 
+  - 3,942 with 500 trees
+  - 4,000 with 60 trees
+
+**Accuracy of model:**
+  - 84.15% with 500 trees
+  - 83.26% with 60 trees
+
+**Incorrect classifications of being in a higher salary bracket:**
+  - 3,150 with 500 trees
+  - 3,092 with 60 trees
+
+**Incorrect classifications of being in a lower salary bracket:**
+  - 1,494 with 500 trees
+  - 1,812 with 60 trees
+
+**True Positive Rate:**
+  - 72.52% with 500 trees
+  - 68.82% with 60 trees
+
+**True Negative Rate:**
+  - 86.8% with 500 trees
+  - 86.84% with 60 trees
+  
+**False Positive Rate:**
+  - 13.2% with 500 trees
+  - 13.16% with 60 trees
+  
+**False Negative Rate:**
+  - 27.48% with 500 trees
+  - 31.18% with 60 trees
+
+Comparing all of these metrics, there is not much difference between the accuracies, true negative, or false positive rates of our model. Both are extremely good at classifying the negative class and have a fairly low rate of classifying someone in the lower bracket of salary as being in the higher salary bracket. A key difference, however, is the drop by around 5% of true positive rate and increase in false negative rate when switching to the 60 tree model. This shows that the accuracy in classifying someone in a higher income bracket drops when switching to the 60 tree model, as well as our inaccuracy in classifying upper income individuals as being lower income. 
+
+As a result, we conclude that the 500 tree model is better the better model. 
+
+### Predictions on Test Data
+
+A datatable with predictions from the 500 tree random forest added on as a column is shown below, along with the associated confusion matrix. 
+
+```{r, echo=FALSE}
+census_predict = predict(census_RF_500,      #<- a randomForest model
+                            census_test,      #<- the test data set to use
+                            type = "response",   #<- what results to produce, see the help menu for the options
+                            predict.all = TRUE,  #<- should the predictions of all trees be kept?
+                            proximity = TRUE)    #<- should proximity measures be computed
+
+#=================================================================================
+
+#### Error rate on the test set ####
+
+# Let's create a summary data frame, basically adding the prediction to the test set. 
+census_test_pred = data.frame(census_test, 
+                                 Prediction = census_predict$predicted$aggregate)
+datatable(head(census_test_pred,500))
+
+
+confusionMatrix(census_test_pred$Prediction,census_test_pred$income,positive = "1", 
+                dnn=c("Prediction", "Actual"), mode = "everything")
+```
+
+#### Metrics
+
+- **Accuracy** = 84.09%
+
+- **Sensitivity (true positive rate)** = 54.61%
+
+- **True negative rate** = 92.90%
+
+- **False positive rate (1-Specificity)** = 7.10%
+
+- **Kappa** = 0.514
+
+Our accuracy is fairly high, at 84%, which is an indication of good model performance. Kappa, which tells us how much better our classifier is performing as compared to a classifier that just randomly guessing according to the frequency of each class, indicates our model is performing moderately better. While the true positive rate is only around 55%, remember that this means we are accurately predicting the upper class individuals 55% of the time. However our true negative rate, which tells us the rate at which we accurately classified those individuals in the lower income bracket, is 92.90%, which is almost perfect. This means our model is extremely good at classifying individuals with income <=50k, and quite poor at classifying the others. 
+
+#### Variable Importance Plot
+
+The variable importance plot for our 500 tree model, as shown earlier, indicates that there are 3-5 variables of utmost importance with these trees, and are significantly higher with their mean decrease in accuracy and gini coefficient that further indicate their relevance. These are the variables of occupation, education, relationship, capital gain, and marital status.
+
+```{r, echo=FALSE}
+varImpPlot(census_RF_500,     #<- the randomForest model to use
+           sort = TRUE,        #<- whether to sort variables by decreasing order of importance
+           n.var = 10,        #<- number of variables to display
+           main = "Important Factors for Identifying Income Level, 500 Trees",
+           #cex = 2,           #<- size of characters or symbols
+           bg = "white",       #<- background color for the plot
+           color = "blue",     #<- color to use for the points and labels
+           lcolor = "orange")  #<- color to use for the horizontal lines
+```
+### Tuning Model
+
+Using the tuneRf function, we are now checking for the optimal number of variables to use/test during the tree building process. 
+
+```{r, echo=FALSE}
+census_RF_mtry = tuneRF(census_train[ ,1:14], 
+                           as.factor(census_train$income),  
+                           mtryStart = 5,                        
+                           ntreeTry = 500,                       
+                           stepFactor = 2,                       
+                           improve = 0.05,                       
+                           trace = FALSE,                        
+                           plot = FALSE,                         
+                           doBest = FALSE)                       
+
+census_RF_mtry
+
+```
+
+Based off of the tuning, 3 variables would produce the lowest OOB error. A model will be rebuilt to test this, as our first model used 4 variables to consider at each split.
+
+### Random Forest - 500 trees, mtry = 3
+
+```{r, echo=FALSE}
+set.seed(1027)	
+census_RF_500_2 = randomForest(income~.,          
+                            census_train,     
+                            ntree = 500,        #<- Number of trees to grow. This should not be set to too small a number, to ensure that every input row gets classified at least a few times.
+                            mtry = 3,            #<- Number of variables randomly sampled as candidates at each split. 
+                            replace = TRUE,      #<- Should sampled data points be replaced.
+                            sampsize = 100,      #<- Size of sample to draw each time.
+                            nodesize = 5,        #<- Minimum numbers of data points in terminal nodes.
+                            importance = TRUE,   #<- Should importance of predictors be assessed?
+                            proximity = FALSE,    #<- Should a proximity measure between rows be calculated?
+                            norm.votes = TRUE,   #<- If TRUE (default), the final result of votes are expressed as fractions. If FALSE, raw vote counts are returned (useful for combining results from different runs).
+                            do.trace = FALSE,     #<- If set to TRUE, give a more verbose output as randomForest is run.
+                            keep.forest = TRUE,  #<- If set to FALSE, the forest will not be retained in the output object. If xtest is given, defaults to FALSE.
+                            keep.inbag = TRUE)   #<- Should an n by ntree matrix be returned that keeps track of which samples are in-bag in which trees? 
+
+
+census_RF_500_2
+```
+
+After running our initial model, we see that we have an OOB estimate of error rate as 15.85%, identical to the one with 4 mtry.
+
+```{r, echo=FALSE}
+census_RF_500_2_acc = sum(census_RF_500_2$confusion[row(census_RF_500_2$confusion) == 
+                                                col(census_RF_500_2$confusion)]) / 
+  sum(census_RF_500_2$confusion)
+
+paste0("Random Forest with 500 Trees, mtry=3 Accuracy: ", round(census_RF_500_2_acc,4) * 100, "%")
+```
+
+This model we generated produced an accuracy level of 84.15%.
+
+The number predicted from the model with 4 mtry and then 3 mtry is listed.
+
+```{r, echo=FALSE}
+table(census_RF_500$predicted)
+table(census_RF_500_2$predicted)
+```
+
+```{r, echo=FALSE}
+census_RF_500_2$confusion
+```
+
+**Correct classifications in the <=50k salary bracket: **
+  - 20,719 with 4 mtry
+  - 20,906 with 3 mtry
+  
+**Correct classifications in the >50k salary bracket:** 
+  - 3,942 with 4 mtry
+  - 3,754 with 3 mtry
+
+**Accuracy of model:**
+  - 84.15% with 4 mtry
+  - 84.15% with 3 mtry
+
+**Incorrect classifications of being in a higher salary bracket:**
+  - 3,150 with 4 mtry
+  - 3,338 with 3 mtry
+
+**Incorrect classifications of being in a lower salary bracket:**
+  - 1,494 with 4 mtry
+  - 1,307 with 3 mtry
+
+**True Positive Rate:**
+  - 72.52% with 4 mtry
+  - 74.18% with 3 mtry
+
+**True Negative Rate:**
+  - 86.8% with 4 mtry
+  - 86.23% with 3 mtry
+  
+**False Positive Rate:**
+  - 13.2% with 4 mtry
+  - 13.77% with 3 mtry
+  
+**False Negative Rate:**
+  - 27.48% with 4 mtry
+  - 25.82% with 3 mtry
+  
+Both of these models are almost identical, although it is noteworthy that the model with 3 variables selected for determining split does have a slightly higher true positive rate and slightly lower false negative rate. With everything else being identical, this small difference makes **the model with 500 trees and an mtry of 3 the ideal model.** 
+
+### Visualize Tree Size
+
+```{r, echo=FALSE}
+hist(treesize(census_RF_500_2,
+              terminal = TRUE), main="Tree Size")
+```
+
+A tree size of 15 is the most frequent size being built in our model of 500 trees and an mtry of 3.
+
+### Evaluating Final Model with ROCR
+
+Below, a ROC curve is plotted to display the performance of our model at a 0.5 threshold prediction threshold. 
+
+```{r, echo=FALSE}
+
+# First, create a prediction object for the ROC curve.
+# Take a look at the "votes" element from our randomForest function.
+
+# The "1" column tells us what percent of the trees voted for 
+# that data point as "pregnant". Let's convert this data set into a
+# data frame with numbers so we could work with it.
+census_RF_500_2_prediction = as.data.frame(as.numeric(as.character(census_RF_500_2$votes[,2])))
+#View(census_RF_500_2_prediction)
+
+# Let's also take the actual classification of each data point and convert
+# it to a data frame with numbers. R classifies a point in either bucket 
+# at a 50% threshold.
+census_train_actual = data.frame(as.factor(census_train$income))
+
+#View(pregnancy_train_actual)
+
+#==================================================================================
+
+####  Tuning the model: the ROC curve ####
+
+# The prediction() function from the ROCR package will transform the data
+# into a standardized format for true positives and false positives.
+census_prediction_comparison = prediction(census_RF_500_2_prediction,           #<- a list or data frame with model predictions
+                                             census_train_actual)#<- a list or data frame with actual class assignments
+#View(census_prediction_comparison)
+#actual values and predictions
+
+#==================================================================================
+
+#### Tuning the model: the ROC curve ####
+
+# Create a performance object for ROC curve where:
+# tpr = true positive rate.
+# fpr = fale positive rate.
+census_pred_performance = performance(census_prediction_comparison, 
+                                         measure = "tpr",    #<- performance measure to use for the evaluation
+                                         x.measure = "fpr")  #<- 2nd performance measure to use for the evaluation
+#View(census_pred_performance)
+
+#### Tuning the model: the ROC curve ####
+
+# The performance() function saves us a lot of time, and can be used directly
+# to plot the ROC curve.
+plot(census_pred_performance, 
+     col = "red", 
+     lwd = 3, 
+     main = "ROC curve")
+grid(col = "black")
+
+
+# Add a 45 degree line.
+#abline(a = 0, 
+       #b = 1,
+       #lwd = 2,
+       #lty = 2,
+       #col = "gray")
+
+#==================================================================================
+
+#### Tuning the model: the ROC curve ####
+
+# Calculate the area under curve (AUC), which can help you compare the 
+# ROC curves of different models for their relative accuracy.
+census_auc_RF = performance(census_prediction_comparison, 
+                               "auc")@y.values[[1]]
+
+paste0("AUC: ", round(census_auc_RF,4))
+
+# Add the AUC value to the ROC plot.
+#text(x = 0.5, 
+     #y = 0.5, 
+     #labels = paste0("AUC = ", 
+                    # round(census_auc_RF,
+                          # 2)))
+```
+
+The AUC value of this model is 0.8924, which is extremely good. This model is performing near excellent, with an AUC of 1 being the max value possible and a perfect model. 
+
+## Summary
+
+3 models were created through the entirety of this lab: a random forest with 500 trees and mtry of 4, a random forest with 60 trees and an mtry of 4, and a random forest with 500 trees and mtry of 3. The last of the three was the most ideal model, with an very high accuracy, as well as true positive and true negative rates. 
+
+It should be noted that regardless of the model, the ability to predict the 'negative' class, or those individuals in an income level of <=50k was much much higher than the 'positive' class. 
+
+Regardless, there were a few variables that were clearly very important when making these decision trees: occupation, relationship, and education were among those top ones. 
+
+I would recommend the government look into potentially evaluating what other classification methods could be used that are stronger at classifying the 'positive class', or trying to optimize another tree that is better at this. This current model is exceptional at classifying the 'negative' class, but not as much with the positive one. When looking into developing policies, the most important variables to look into to determine an income bracket would be occupation, relationship, and education. 
+
+I would also be weary of the false rates that this model possesses, particularly falsely classifying someone from a higher salary as one of a lower salary. Policies may not work as effectively or as much as desired if you are targeting lower salaries but end up applying the policies and enforcing them to people who are really of a larger income. They could unfairly benefit greatly, or also be unhappy with the policies.
+
+Additionally, the dataset was definitely skewed with the largest majority of individuals in the set being in the lower income bracket, which may explain this model's strong ability to classify this class but not the other. 
